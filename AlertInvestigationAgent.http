@@ -1,0 +1,6 @@
+@AlertInvestigationAgent_HostAddress = http://localhost:5293
+
+GET {{AlertInvestigationAgent_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
