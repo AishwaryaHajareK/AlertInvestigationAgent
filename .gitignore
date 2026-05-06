@@ -25,4 +25,5 @@ Thumbs.db
 ## Secrets
 appsettings.*.json
 !appsettings.json
-!appsettings.Development.json
+# appsettings.Development.json contains local secrets (Azure OpenAI key,
+# Azure AD client secret). It MUST stay out of source control.

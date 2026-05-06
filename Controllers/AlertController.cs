@@ -1,8 +1,7 @@
-﻿using Microsoft.AspNetCore.Mvc;
-using Microsoft.ApplicationInsights;
-using System.Text;
-using System.Text.Json;
+﻿using AlertInvestigationAgent.Models;
 using AlertInvestigationAgent.Services;
+using Microsoft.ApplicationInsights;
+using Microsoft.AspNetCore.Mvc;
 
 namespace AlertInvestigationAgent.Controllers
 {
@@ -11,69 +10,78 @@ namespace AlertInvestigationAgent.Controllers
     public class AlertController : ControllerBase
     {
         private readonly InvestigationService _investigationService;
+        private readonly AlertParser _parser;
+        private readonly TeamsGraphService _teams;
         private readonly TelemetryClient _telemetry;
+        private readonly ILogger<AlertController> _logger;
 
-        public AlertController(TelemetryClient telemetry)
+        public AlertController(
+            InvestigationService investigationService,
+            AlertParser parser,
+            TeamsGraphService teams,
+            TelemetryClient telemetry,
+            ILogger<AlertController> logger)
         {
+            _investigationService = investigationService;
+            _parser = parser;
+            _teams = teams;
             _telemetry = telemetry;
-            _investigationService = new InvestigationService();
+            _logger = logger;
         }
 
+        /// <summary>
+        /// Manual ingestion endpoint. Accepts a structured AlertPayload, runs the
+        /// investigation pipeline, and returns the formatted summary.
+        /// </summary>
         [HttpPost]
         public async Task<IActionResult> ReceiveAlert([FromBody] AlertPayload alert)
         {
-            // ✅ Track alert in App Insights
+            if (alert is null) return BadRequest("Alert payload is required.");
+
             _telemetry.TrackEvent("AlertTriggered", new Dictionary<string, string>
             {
-                { "AlertName", alert.AlertName },
-                { "Severity", alert.Severity }
+                { "AlertName", alert.AlertName ?? "" },
+                { "Severity", alert.Severity ?? "" }
             });
 
             var result = await _investigationService.InvestigateAsync(alert);
+            var summary = InvestigationFormatter.ToPlainText(result);
 
-            var summary = $@"
-                🚨 Automated Alert Investigation 🚨
-                
-                Alert: {result.AlertName}
-                Severity: {result.Severity}
-                
-                Likely Cause:
-                {result.LikelyCause}
-                
-                Impact:
-                - {result.FailedRequests} failed requests
-                - Error rate ~{result.ErrorRatePercent}%
-                
-                Frequency:
-                - {result.Occurrences24h} times in last 24 hours
-                - {result.Occurrences30d} times in last 30 days
-                
-                Suggested Actions:
-                - {string.Join("\n- ", result.SuggestedActions)}
-                ";
-
-            await SendToTeams(summary);
-
-            return Ok("Investigation completed and sent to Teams");
+            _logger.LogInformation("Investigation complete for {AlertName}", alert.AlertName);
+            return Ok(new { summary, result });
         }
 
-        private async Task SendToTeams(string message)
+        /// <summary>
+        /// Accepts the raw HTML / text body of a Teams alert message, parses it,
+        /// runs the investigation, and returns the result. Useful for testing the
+        /// pipeline without Graph access.
+        /// </summary>
+        [HttpPost("ingest-raw")]
+        public async Task<IActionResult> IngestRaw([FromBody] RawAlertRequest body)
         {
-            var webhookUrl = "PASTE_YOUR_TEAMS_WEBHOOK_URL";
+            if (body is null || string.IsNullOrWhiteSpace(body.Content))
+                return BadRequest("Content is required.");
 
-            var payload = new { text = message };
-            var json = JsonSerializer.Serialize(payload);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var alert = _parser.Parse(body.Content);
+            var result = await _investigationService.InvestigateAsync(alert);
 
-            using var client = new HttpClient();
-            await client.PostAsync(webhookUrl, content);
+            return Ok(new
+            {
+                parsed = alert,
+                summary = InvestigationFormatter.ToPlainText(result),
+                result
+            });
         }
-    }
 
-    public class AlertPayload
-    {
-        public string AlertName { get; set; }
-        public string Severity { get; set; }
-        public string Description { get; set; }
+        /// <summary>
+        /// Diagnostic endpoint — returns whether Teams/Graph integration is configured.
+        /// </summary>
+        [HttpGet("teams-status")]
+        public IActionResult TeamsStatus() => Ok(new { configured = _teams.IsConfigured() });
+
+        public class RawAlertRequest
+        {
+            public string Content { get; set; } = string.Empty;
+        }
     }
 }
